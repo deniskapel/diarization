@@ -1,46 +1,41 @@
-import webrtcvad
+import re
 import sys
 import collections
-import contextlib
-import wave
-from io import BytesIO
-
+import subprocess
+from nltk.tokenize import word_tokenize
 from pydub import AudioSegment
+from Frame import Frame
+from fuzzywuzzy import fuzz
+from fuzzywuzzy import process
 
-def read_audio(path, codec):
-    """Reads an audiofile.
-    Takes the path, and returns (PCM audio data, sample rate).
+def read_audio(path, sample_rate):
+    """returns raw data of the file
+    Takes the path, and returns PCM audio data.
     """
-    lesson = AudioSegment.from_file(path, codec)
-    sample_rate = lesson.frame_rate
-    pcm_data = lesson.set_channels(1).raw_data
+    # get raw data
+    ffmpeg_process = subprocess.Popen(['ffmpeg', '-loglevel', 'quiet', '-i',
+                                path,
+                                '-vn', # disable video
+                                '-ar', str(sample_rate), # set frame_rate
+                                '-ac', '1', # get only left channel
+                                '-f', 's16le', '-' # set format
+                                ],
+                                stdout=subprocess.PIPE)
+    pcm_data = ffmpeg_process.stdout.read()
+    return pcm_data
 
-    return pcm_data, sample_rate
 
-def write_audio(path, audio, sample_rate):
-    """Writes a .wav file.
-    Takes path, PCM audio data, and sample rate.
+def write_audio(path, pcm_data, sample_rate):
+    """Writes a 16kHz MP3 file.
+    Takes path, and PCM audio data.
     """
-    # AudioSegment(audio,
-    #              sample_width=2,
-    #              frame_rate=sample_rate,
-    #              channels=1).export(path,
-    #                                 format='mp3',
-    #                                 codec='libmp3lame',
-    #                                 bitrate='64')
-    AudioSegment(audio,
+    AudioSegment(pcm_data,
                  sample_width=2,
                  frame_rate=sample_rate,
                  channels=1).export(path,
-                                    format='wav')
-
-
-class Frame(object):
-    """Represents a "frame" of audio data."""
-    def __init__(self, bytes, timestamp, duration):
-        self.bytes = bytes
-        self.timestamp = timestamp
-        self.duration = duration
+                                    format='mp3',
+                                    codec='libmp3lame',
+                                    bitrate='64')
 
 
 def frame_generator(frame_duration_ms, audio, sample_rate):
@@ -131,32 +126,13 @@ def vad_collector(sample_rate, frame_duration_ms,
         yield b''.join([f.bytes for f in voiced_frames])
 
 
-def main(args):
-    if len(args) != 4:
-        sys.stderr.write(
-            'Usage: diarization.py <aggressiveness> <path to wav file> <codec> <mode>\n')
-        sys.exit(1)
-    if args[3] != 'chunks' and args[3] != 'long':
-        sys.stderr.write(
-            'Usage: args[3] equals either <chunks> or <long> \n')
-        sys.exit(1)
+def tokenizer(utterance):
+    """Tokenizes a received utterance into a list of single-word string"""
+    return(word_tokenize(re.sub(r'[,\'\"\.]', '', utterance)))
 
-    audio, sample_rate = read_audio(args[1], args[2])
-    vad = webrtcvad.Vad(int(args[0]))
-    frames = frame_generator(30, audio, sample_rate)
-    frames = list(frames)
-    segments = vad_collector(sample_rate, 30, 300, vad, frames)
-
-    if args[3] == 'chunks':
-        for i, segment in enumerate(segments):
-            path = 'chunks/chunk-%002d.wav' % (i,)
-            print(' Writing %s' % (path,))
-            write_audio(path, segment, sample_rate)
-    if args[3] == 'long':
-        voiced_pcm = bytearray()
-        for segment in segments:
-            voiced_pcm.extend(segment)
-        write_audio('voiced/lesson.wav', voiced_pcm, sample_rate)
-
-if __name__ == '__main__':
-    main(sys.argv[1:])
+def count_vocab(word, words):
+    """Counts how many occurances of a word there are in a transcript"""
+    return(len(
+        process.extractBests(word, words,
+                             scorer=fuzz.ratio,
+                             score_cutoff=70)))
